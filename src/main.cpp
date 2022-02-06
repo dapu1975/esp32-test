@@ -1,50 +1,50 @@
 #include <Arduino.h>
+#include <stdlib.h>
+#include <string.h>
 #include <Wire.h>
+
+#include "getCommandLineFromSerialPort.h"
+#include "SimpleCLI.h"
+#include "HX711.h"
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiWire.h"
-#include <SimpleCLI.h>
-#include "HX711.h"
-#include "string.h"
-#include "stdlib.h"
 
-// OLED circuit wiring
+/* OLED circuit wiring */
 #define I2C_ADDRESS 0x3C // 0X3C+SA0 - 0x3C or 0x3D
 #define RST_PIN -1       // Define proper RST_PIN if required.
 SSD1306AsciiWire oled;
 
-// HX711 circuit wiring
+/* HX711 circuit wiring */
 const int LOADCELL_DOUT_PIN = 26;
 const int LOADCELL_SCK_PIN = 27;
 HX711 scale;
 
-// TODO : receive commands from uart
-//  console interface uart
-//  $1 = request parameter $1
-//  $1 = 100 set parameter $1 to 100
-//  $$ = show all parameter
-//  $T = tara set current weight to zero
-//  $C = calibrate
-//  $R = restart
-//  $RST=RST = reset all to default
-
-String inputString = "";     // a String to hold incoming data
-bool stringComplete = false; // whether the string is complete
-
-#define CR '\r'
-#define LF '\n'
-#define BS '\b'
-#define NULLCHAR '\0'
-#define SPACE ' '
-
-#define COMMAND_BUFFER_LENGTH 25             // length of serial buffer for incoming commands
+/* CommandLineInterface */
+String inputString = "";                     // a String to hold incoming data
+bool stringComplete = false;                 // whether the string is complete
 char CommandLine[COMMAND_BUFFER_LENGTH + 1]; // Read commands into this buffer from Serial.  +1 in length for a termination char
+String result;
+const char *delimiters = ", \n";             // commands can be separated by return, space or comma
 
-const char *delimiters = ", \n"; // commands can be separated by return, space or comma
+//  CLI - command line interface (uart)
+//  $1        -> request parameter $1
+//  $1 = 100  -> set parameter $1 to 100
+//  $$        -> show all parameter
+//  $TARA     -> tara set current weight to zero
+//  $CALI     -> calibrate
+//  $REBOOT   -> restart
+//  $RESET    -> reset all to default
+//  $RUN      -> start filling
+//  $STOP     -> filling
+//  $WEIGH    -> weigh with tara and scale
 
-// prototypes
-bool getCommandLineFromSerialPort(char *commandLine);
-
-//-----------------------------------------------------------------------------
+// 1st must be "$"
+// When there is more than A-Za-z0-9= then reject command
+// when there is an "=" in cmd then split into operator and operand
+// do command
+// return "ok" or "error"
+// "break#<errorcode>" stops all communication and 
+/*---------------------------------------------------------------------------*/
 void setup()
 {
   // reserve 200 bytes for the inputString:
@@ -57,16 +57,35 @@ void setup()
   oled.begin(&Adafruit128x32, I2C_ADDRESS);
   oled.setFont(Adafruit5x7);
   oled.set2X();
+  // beep
+  pinMode(32, OUTPUT);
+  digitalWrite(32, LOW);
+  delay(250);
+  digitalWrite(32, HIGH);
   // initialize scale
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN, 128);
+  Serial.println("\n\n*************************************");
+  Serial.println("*** (c) 2022 D. Pust - Waage V1.0 ***");
+  Serial.println("*************************************");
 }
-//-----------------------------------------------------------------------------
+/*---------------------------------------------------------------------------*/
 void loop()
 {
-
-  bool received = getCommandLineFromSerialPort(CommandLine); // global CommandLine is defined in CommandLine.h
+  bool received = getCommandLineFromSerialPort(CommandLine);
   if (received)
   {
+    result = "Error - wrong syntax";
+    if (strcmp(CommandLine, "$RESET") == 0) {
+      result = "x";
+      ESP.restart(); 
+    } else
+    if (strcmp(CommandLine, "$TARA") == 0) {
+      result = "NOK";
+    } else
+    if (strcmp(CommandLine, "$CALI") == 0) {
+      result = "NOK";
+    }
+    Serial.println(result);
   }
 
   if (scale.wait_ready_timeout(1000))
@@ -82,42 +101,4 @@ void loop()
     Serial.println("HX711 not found.");
   }
 }
-//-----------------------------------------------------------------------------
-bool getCommandLineFromSerialPort(char *commandLine)
-{
-  static uint8_t charsRead = 0; // note: COMAND_BUFFER_LENGTH must be less than 255 chars long
-  // read asynchronously until full command input
-  while (Serial.available())
-  {
-    char c = Serial.read();
-    switch (c)
-    {
-    case CR: // likely have full command in buffer now, commands are terminated by CR and/or LS
-    case LF:
-      commandLine[charsRead] = NULLCHAR; // null terminate our command char array
-      if (charsRead > 0)
-      {
-        charsRead = 0; // charsRead is static, so have to reset
-        Serial.println(commandLine);
-        return true;
-      }
-      break;
-    case BS: // handle backspace in input: put a space in last char
-      if (charsRead > 0)
-      { // and adjust commandLine and charsRead
-        commandLine[--charsRead] = NULLCHAR;
-        Serial << byte(BS) << byte(SPACE) << byte(BS); // no idea how this works, found it on the Internet
-      }
-      break;
-    default:
-      // c = tolower(c);
-      if (charsRead < COMMAND_BUFFER_LENGTH)
-      {
-        commandLine[charsRead++] = c;
-      }
-      commandLine[charsRead] = NULLCHAR; // just in case
-      break;
-    }
-  }
-  return false;
-}
+/*---------------------------------------------------------------------------*/
