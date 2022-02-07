@@ -1,49 +1,42 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include <stdlib.h>
 #include <string.h>
 #include <Wire.h>
 
 #include "getCommandLineFromSerialPort.h"
-#include "SimpleCLI.h"
 #include "HX711.h"
 #include "SSD1306Ascii.h"
 #include "SSD1306AsciiWire.h"
+
+Preferences preferences;
+unsigned int StartCounter;
 
 /* OLED circuit wiring */
 #define I2C_ADDRESS 0x3C // 0X3C+SA0 - 0x3C or 0x3D
 #define RST_PIN -1       // Define proper RST_PIN if required.
 SSD1306AsciiWire oled;
 
+#define BUZZER 34 // Buzzer
+#define BUTTON 25 // Button
+
 /* HX711 circuit wiring */
 const int LOADCELL_DOUT_PIN = 26;
 const int LOADCELL_SCK_PIN = 27;
-HX711 scale;
+long LOADCELL_OFFSET;
+long LOADCELL_DIVIDER;
+bool cleared;
+HX711 loadcell;
 
 /* CommandLineInterface */
 String inputString = "";                     // a String to hold incoming data
 bool stringComplete = false;                 // whether the string is complete
-char CommandLine[COMMAND_BUFFER_LENGTH + 1]; // Read commands into this buffer from Serial.  +1 in length for a termination char
+char CommandLine[COMMAND_BUFFER_LENGTH + 1]; // Read commands into this buffer
+                                             // from Serial.  +1 in length
+                                             // for a termination char
 String result;
-const char *delimiters = ", \n";             // commands can be separated by return, space or comma
 
-//  CLI - command line interface (uart)
-//  $1        -> request parameter $1
-//  $1 = 100  -> set parameter $1 to 100
-//  $$        -> show all parameter
-//  $TARA     -> tara set current weight to zero
-//  $CALI     -> calibrate
-//  $REBOOT   -> restart
-//  $RESET    -> reset all to default
-//  $RUN      -> start filling
-//  $STOP     -> filling
-//  $WEIGH    -> weigh with tara and scale
-
-// 1st must be "$"
-// When there is more than A-Za-z0-9= then reject command
-// when there is an "=" in cmd then split into operator and operand
-// do command
-// return "ok" or "error"
-// "break#<errorcode>" stops all communication and 
+bool filling = false;
 /*---------------------------------------------------------------------------*/
 void setup()
 {
@@ -57,16 +50,31 @@ void setup()
   oled.begin(&Adafruit128x32, I2C_ADDRESS);
   oled.setFont(Adafruit5x7);
   oled.set2X();
-  // beep
-  pinMode(32, OUTPUT);
-  digitalWrite(32, LOW);
+  // initialize beeper
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
   delay(250);
-  digitalWrite(32, HIGH);
-  // initialize scale
-  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN, 128);
+  digitalWrite(BUZZER, HIGH);
+  // initialize button
+  pinMode(BUTTON, INPUT_PULLUP);
+  // initialize load cell
+  preferences.begin("pust", false);
+  LOADCELL_OFFSET = preferences.getLong("LC_OFFSET", 50682624);
+  LOADCELL_DIVIDER = preferences.getLong("LC_DIVIDER", 5895655);
+  preferences.end();
+  loadcell.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  loadcell.set_offset(LOADCELL_OFFSET);
+  loadcell.set_scale(LOADCELL_DIVIDER);
   Serial.println("\n\n*************************************");
-  Serial.println("*** (c) 2022 D. Pust - Waage V1.0 ***");
+  Serial.println("*** (c) 2022 D. Pust - Waage V0.1 ***");
   Serial.println("*************************************");
+  // increment StartCounter
+  preferences.begin("pust", false);
+  StartCounter = preferences.getUInt("Counter", 0);
+  StartCounter++;
+  preferences.putUInt("Counter", StartCounter);
+  preferences.end();
+  delay(500);
 }
 /*---------------------------------------------------------------------------*/
 void loop()
@@ -75,25 +83,87 @@ void loop()
   if (received)
   {
     result = "Error - wrong syntax";
-    if (strcmp(CommandLine, "$RESET") == 0) {
-      result = "x";
-      ESP.restart(); 
-    } else
-    if (strcmp(CommandLine, "$TARA") == 0) {
-      result = "NOK";
-    } else
-    if (strcmp(CommandLine, "$CALI") == 0) {
-      result = "NOK";
+    if (strcmp(CommandLine, "$LIST") == 0)
+    {
+      Serial.print("StartCounter = ");
+      Serial.println(StartCounter);
+      Serial.print("LC_DIVIDER = ");
+      Serial.println(LOADCELL_DIVIDER);
+      Serial.print("LC_OFFSET = ");
+      Serial.println(LOADCELL_OFFSET);
+      Serial.print("cell cleared = ");
+      Serial.println(cleared);
+      result = "OK";
+    }
+    if (strcmp(CommandLine, "$FORMAT") == 0)
+    {
+      result = "";
+      preferences.begin("pust", false);
+      preferences.clear();
+      preferences.end();
+      ESP.restart();
+    }
+    else if (strcmp(CommandLine, "$REBOOT") == 0)
+    {
+      ESP.restart();
+    }
+    else if (strcmp(CommandLine, "$TARE") == 0)
+    {
+      loadcell.tare();
+      LOADCELL_OFFSET = loadcell.get_offset();
+      preferences.begin("pust", false);
+      preferences.putLong("LC_OFFSET", LOADCELL_OFFSET);
+      preferences.end();
+      result = "OK";
+    }
+    else if (strcmp(CommandLine, "$CLEAR") == 0)
+    {
+      loadcell.set_scale();
+      loadcell.tare();
+      cleared = true;
+      oled.clear();
+      result = "OK";
+    }
+    else if (strcmp(CommandLine, "$CALI") == 0)
+    {
+      if (cleared)
+      {
+        LOADCELL_DIVIDER = long(loadcell.get_units(10) / 67.9);
+        loadcell.set_scale(LOADCELL_DIVIDER);
+        preferences.begin("pust", false);
+        preferences.putLong("LC_DIVIDER", LOADCELL_DIVIDER);
+        preferences.end();
+        cleared = false;
+        result = "OK";
+      }
+      else
+      {
+        result = "ERROR - not cleared before calibrate";
+      }
+    }
+    else if (strcmp(CommandLine, "$START") == 0)
+    {
+      filling = true;
+      result = "OK";
+    }
+    else if (strcmp(CommandLine, "$STOP") == 0)
+    {
+      filling = false;
+      result = "OK";
     }
     Serial.println(result);
   }
 
-  if (scale.wait_ready_timeout(1000))
+  if (loadcell.wait_ready_timeout(100))
   {
-    long reading = scale.read_average(20);
-    oled.home();
-    oled.println("HX711: ");
-    oled.println(reading);
+    if (cleared == false)
+    {
+      long channel_value = loadcell.get_units(20); // channel value
+      oled.home();
+      oled.println("HX711:       ");
+      oled.print(channel_value);
+      oled.println(" g     ");
+    }
   }
   else
   {

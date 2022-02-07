@@ -27,7 +27,7 @@ bool getCommandLineFromSerialPort(char *commandLine)
             }
             break;
         default:
-            // c = tolower(c);
+            c = toupper(c);
             if (charsRead < COMMAND_BUFFER_LENGTH)
             {
                 commandLine[charsRead++] = c;
